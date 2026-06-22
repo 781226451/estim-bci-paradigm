@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-医生端：通过 LSL 控制患者端，并保存患者 VAS 评分。
+医生端：通过 LSL 控制患者端，并保存患者 VAS-D 评分。
 """
 
 import csv
@@ -22,6 +22,8 @@ _DEFAULTS = {
             "rating_stream": "estim_bci_rating",
             "resolve_interval_s": 1.0,
             "resolve_timeout_s": 0.05},
+    "rating": {"name": "VAS-D",
+               "full_name": "visual analog scale-depression"},
     "font": {"name": "Microsoft YaHei"},
 }
 
@@ -49,6 +51,8 @@ RATING_STREAM = str(CFG["lsl"]["rating_stream"])
 RESOLVE_INTERVAL_S = float(CFG["lsl"]["resolve_interval_s"])
 RESOLVE_TIMEOUT_S = float(CFG["lsl"]["resolve_timeout_s"])
 FONT = str(CFG["font"]["name"])
+RATING_NAME = str(CFG["rating"]["name"])
+RATING_FULL_NAME = str(CFG["rating"]["full_name"])
 
 DATA_DIR = os.path.join(_BASE_DIR, "data")
 
@@ -62,6 +66,7 @@ COL_TEXT = "white"
 ST_IDLE = "idle"
 ST_STIM = "stimulating"
 ST_RATING = "rating"
+ST_REVIEW = "review"
 
 MSG_START = "START_STIM"
 MSG_END_STIM = "END_STIM"
@@ -159,12 +164,17 @@ def rising_edge(pressed_now, prev_pressed):
     return pressed_now and not prev_pressed
 
 
+def fmt_score(score):
+    score = float(score)
+    return str(int(score)) if score.is_integer() else f"{score:.1f}"
+
+
 def ask_subject_info():
     info = {"被试编号": "S001", "被试姓名": "", "实验者": ""}
     dlg = gui.DlgFromDict(dictionary=info, title="电刺激范式 - 被试信息",
                           order=["被试编号", "被试姓名", "实验者"])
     if not dlg.OK:
-        core.quit()
+        return None
     return info
 
 
@@ -174,20 +184,71 @@ def open_data_file(subject_info):
     csv_path = os.path.join(DATA_DIR, f"{subject_info['被试编号']}_{stamp}.csv")
     csv_file = open(csv_path, "w", newline="", encoding="utf-8-sig")
     writer = csv.writer(csv_file)
-    writer.writerow(["被试编号", "被试姓名", "实验者", "轮次", "VAS评分",
+    writer.writerow(["被试编号", "被试姓名", "实验者", "轮次", f"{RATING_NAME}评分",
                      "刺激开始时间", "刺激结束时间", "评分提交时间",
                      "评分接收时间", "刺激时长(s)"])
     csv_file.flush()
     return csv_file, writer
 
 
-def main():
-    subject_info = ask_subject_info()
-    csv_file, writer = open_data_file(subject_info)
-
-    cmd_outlet = make_outlet(COMMAND_STREAM, "estim_bci_doctor_command")
+def wait_for_patient():
     rating_inlet = None
     last_resolve_t = -RESOLVE_INTERVAL_S
+    patient_ready = False
+
+    win = make_window("医生端 - 等待患者端", SCREEN_INDEX)
+    win.mouseVisible = False
+
+    title = make_text(win, "等待患者端连接", pos=(0, 0.12),
+                      height=0.09, bold=True)
+    status = make_text(win, "", pos=(0, -0.04), height=0.05,
+                       color="#9fd3ff")
+    hint = make_text(win, "请先启动患者端；ESC 可退出", pos=(0, -0.24),
+                     height=0.035, color="#888888")
+    clock = core.Clock()
+
+    try:
+        while not patient_ready:
+            if event.getKeys(keyList=["escape"]):
+                win.close()
+                core.quit()
+
+            now = clock.getTime()
+            if rating_inlet is None and now - last_resolve_t >= RESOLVE_INTERVAL_S:
+                rating_inlet = try_make_inlet(RATING_STREAM)
+                last_resolve_t = now
+
+            for raw_message, _timestamp in pull_messages(rating_inlet):
+                kind, _fields = parse_message(raw_message)
+                if kind == MSG_READY:
+                    patient_ready = True
+                    break
+
+            if rating_inlet is None:
+                status.text = "状态：正在查找患者端评分流……"
+            else:
+                status.text = "状态：已发现患者端，等待 READY……"
+
+            title.draw()
+            status.draw()
+            hint.draw()
+            win.flip()
+    finally:
+        win.close()
+
+    return rating_inlet
+
+
+def main():
+    cmd_outlet = make_outlet(COMMAND_STREAM, "estim_bci_doctor_command")
+    rating_inlet = wait_for_patient()
+
+    subject_info = ask_subject_info()
+    if subject_info is None:
+        cmd_outlet.push_sample([make_message(MSG_END_EXP, 0, fmt_time(datetime.datetime.now()))])
+        core.quit()
+
+    csv_file, writer = open_data_file(subject_info)
 
     win = make_window("医生端", SCREEN_INDEX)
     win.mouseVisible = True
@@ -199,6 +260,7 @@ def main():
     status = make_text(win, "", pos=(0, 0.02), height=0.05, color="#9fd3ff")
     btn_start = Button(win, "开始刺激", pos=(-0.32, -0.25))
     btn_endstim = Button(win, "结束刺激", pos=(-0.32, -0.25))
+    btn_next = Button(win, "进行下一轮", pos=(-0.32, -0.25))
     btn_endexp = Button(win, "结束实验", pos=(0.32, -0.25),
                         base_color=COL_BTN_END, hover_color=COL_BTN_END_HOVER)
     hint = make_text(win, "提示：ESC 可紧急退出", pos=(0, -0.45),
@@ -209,7 +271,8 @@ def main():
     rnd = 1
     stim_start_t = None
     stim_end_t = None
-    patient_ready = False
+    last_rating = None
+    last_rating_round = None
     prev_pressed = False
     running = True
 
@@ -226,35 +289,28 @@ def main():
             cmd_outlet.push_sample([make_message(MSG_END_EXP, rnd, fmt_time(datetime.datetime.now()))])
             quit_all()
 
-        now = clock.getTime()
-        if rating_inlet is None and now - last_resolve_t >= RESOLVE_INTERVAL_S:
-            rating_inlet = try_make_inlet(RATING_STREAM)
-            last_resolve_t = now
-
         for raw_message, _timestamp in pull_messages(rating_inlet):
             kind, fields = parse_message(raw_message)
             if kind == MSG_READY:
-                patient_ready = True
                 continue
             if kind != MSG_RATING or len(fields) < 3:
                 continue
             rating_rnd = int(fields[0])
-            rating = int(float(fields[1]))
+            rating = float(fields[1])
             submit_time = fields[2]
             if state == ST_RATING and rating_rnd == rnd and stim_start_t and stim_end_t:
                 receive_t = datetime.datetime.now()
                 duration = (stim_end_t - stim_start_t).total_seconds()
                 writer.writerow([
                     subject_info["被试编号"], subject_info["被试姓名"],
-                    subject_info["实验者"], rnd, rating,
+                    subject_info["实验者"], rnd, fmt_score(rating),
                     fmt_time(stim_start_t), fmt_time(stim_end_t), submit_time,
                     fmt_time(receive_t), round(duration, 2),
                 ])
                 csv_file.flush()
-                rnd += 1
-                stim_start_t = None
-                stim_end_t = None
-                state = ST_IDLE
+                last_rating = rating
+                last_rating_round = rating_rnd
+                state = ST_REVIEW
 
         pressed = mouse.getPressed()[0]
         click = rising_edge(pressed, prev_pressed)
@@ -263,17 +319,11 @@ def main():
             cmd_outlet.push_sample([make_message(MSG_END_EXP, rnd, fmt_time(datetime.datetime.now()))])
             running = False
 
-        connected = rating_inlet is not None and patient_ready
         if state == ST_IDLE:
-            if connected:
-                status.text = "状态：待机，可开始本轮刺激"
-                btn_start.base_color = COL_BTN
-                btn_start.hover_color = COL_BTN_HOVER
-            else:
-                status.text = "状态：等待患者端连接……"
-                btn_start.base_color = "#555555"
-                btn_start.hover_color = "#555555"
-            if connected and click and btn_start.contains(mouse):
+            status.text = "状态：待机，可开始本轮刺激"
+            btn_start.base_color = COL_BTN
+            btn_start.hover_color = COL_BTN_HOVER
+            if click and btn_start.contains(mouse):
                 stim_start_t = datetime.datetime.now()
                 cmd_outlet.push_sample([make_message(MSG_START, rnd, fmt_time(stim_start_t))])
                 state = ST_STIM
@@ -285,6 +335,15 @@ def main():
                 state = ST_RATING
         elif state == ST_RATING:
             status.text = "状态：等待患者评分回传……"
+        elif state == ST_REVIEW:
+            status.text = f"第 {last_rating_round} 轮{RATING_NAME}评分：{fmt_score(last_rating)}。是否进行下一轮？"
+            if click and btn_next.contains(mouse):
+                rnd += 1
+                stim_start_t = None
+                stim_end_t = None
+                last_rating = None
+                last_rating_round = None
+                state = ST_IDLE
 
         doc_round.text = f"当前刺激轮数：第 {rnd} 轮"
         title.draw()
@@ -294,6 +353,8 @@ def main():
             btn_start.draw(mouse)
         elif state == ST_STIM:
             btn_endstim.draw(mouse)
+        elif state == ST_REVIEW:
+            btn_next.draw(mouse)
         btn_endexp.draw(mouse)
         hint.draw()
         win.flip()
