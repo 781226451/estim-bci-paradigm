@@ -28,6 +28,11 @@ rating_stream = "estim_bci_rating"
 resolve_interval_s = 1.0
 resolve_timeout_s = 0.05
 
+[rating]
+# 当前评分量表：visual analog scale-depression，简称 VAS-D。
+name = "VAS-D"
+full_name = "visual analog scale-depression"
+
 [font]
 # 中文字体名称。Windows 11 自带 "Microsoft YaHei"。
 # 若显示方块或缺字，可改为 "SimHei" / "SimSun" 等已安装字体。

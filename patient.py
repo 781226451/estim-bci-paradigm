@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-患者端：接收医生端 LSL 指令，显示刺激状态并回传 VAS 评分。
+患者端：接收医生端 LSL 指令，显示刺激状态并回传 VAS-D 评分。
 """
 
 import datetime
@@ -21,6 +21,11 @@ _DEFAULTS = {
             "rating_stream": "estim_bci_rating",
             "resolve_interval_s": 1.0,
             "resolve_timeout_s": 0.05},
+    "rating": {"name": "VAS-D",
+               "full_name": "visual analog scale-depression",
+               "min": 0,
+               "max": 100,
+               "step": 1},
     "font": {"name": "Microsoft YaHei"},
 }
 
@@ -48,8 +53,17 @@ RATING_STREAM = str(CFG["lsl"]["rating_stream"])
 RESOLVE_INTERVAL_S = float(CFG["lsl"]["resolve_interval_s"])
 RESOLVE_TIMEOUT_S = float(CFG["lsl"]["resolve_timeout_s"])
 FONT = str(CFG["font"]["name"])
-
-VAS_MIN, VAS_MAX = 0, 100
+RATING_NAME = str(CFG["rating"]["name"])
+RATING_FULL_NAME = str(CFG["rating"]["full_name"])
+RATING_MIN = float(CFG["rating"]["min"])
+RATING_MAX = float(CFG["rating"]["max"])
+RATING_STEP = float(CFG["rating"]["step"])
+RATING_TICKS = [
+    RATING_MIN + (RATING_MAX - RATING_MIN) * step / 5
+    for step in range(6)
+]
+RATING_LABELS = []
+RATING_ANCHORS = ["无抑郁", "中等抑郁", "最严重抑郁"]
 
 COL_BG = "#1e1e28"
 COL_BTN = "#3a6ea5"
@@ -156,6 +170,11 @@ def rising_edge(pressed_now, prev_pressed):
     return pressed_now and not prev_pressed
 
 
+def fmt_score(score):
+    score = float(score)
+    return str(int(score)) if score.is_integer() else f"{score:.1f}"
+
+
 def main():
     rating_outlet = make_outlet(RATING_STREAM, "estim_bci_patient_rating")
     command_inlet = None
@@ -173,20 +192,27 @@ def main():
                          color="#ff8a5a", bold=True)
     pat_stim_sub = make_text(win, "请保持放松", pos=(0, -0.18),
                              height=0.06, color="#cccccc")
-    pat_rate_title = make_text(win, "请对刚才的疼痛程度进行评分",
+    pat_rate_title = make_text(win, f"请进行 {RATING_NAME} 评分",
                                pos=(0, 0.34), height=0.07, bold=True)
+    pat_rate_hint = make_text(
+        win, f"拖动滑块选择 {fmt_score(RATING_MIN)}-{fmt_score(RATING_MAX)} 分",
+                              pos=(0, 0.24), height=0.04, color="#cccccc")
     pat_slider = visual.Slider(
-        win, ticks=(VAS_MIN, VAS_MAX), labels=None,
-        pos=(0, 0.0), size=(1.2, 0.06), granularity=1, style="slider",
+        win, ticks=RATING_TICKS,
+        labels=RATING_LABELS,
+        pos=(0, -0.02), size=(1.35, 0.07), granularity=RATING_STEP,
+        style="slider",
         color="white", fillColor="#5a8ec5", borderColor="white",
-        font=FONT, labelHeight=0.04, flip=False)
-    pat_lab_left = make_text(win, "0\n无痛", pos=(-0.62, -0.12),
-                             height=0.045)
-    pat_lab_right = make_text(win, "100\n最痛", pos=(0.62, -0.12),
-                              height=0.045)
-    pat_value = make_text(win, "", pos=(0, 0.16), height=0.08,
+        font=FONT, labelHeight=0.035, flip=False)
+    pat_lab_left = make_text(win, RATING_ANCHORS[0], pos=(-0.70, -0.17),
+                             height=0.045, color="#cccccc")
+    pat_lab_mid = make_text(win, RATING_ANCHORS[1], pos=(0, -0.17),
+                            height=0.045, color="#cccccc")
+    pat_lab_right = make_text(win, RATING_ANCHORS[2], pos=(0.70, -0.17),
+                              height=0.045, color="#cccccc")
+    pat_value = make_text(win, "", pos=(0, 0.14), height=0.09,
                           color="#9fd3ff", bold=True)
-    btn_confirm = Button(win, "确认评分", pos=(0, -0.34), size=(0.5, 0.14))
+    btn_confirm = Button(win, "确认评分", pos=(0, -0.38), size=(0.5, 0.14))
 
     clock = core.Clock()
     state = ST_IDLE
@@ -250,14 +276,14 @@ def main():
                 btn_confirm.base_color = "#555555"
                 btn_confirm.hover_color = "#555555"
             else:
-                pat_value.text = f"当前评分：{int(rating)}"
+                pat_value.text = f"当前评分：{fmt_score(rating)}"
                 btn_confirm.base_color = COL_BTN
                 btn_confirm.hover_color = COL_BTN_HOVER
 
             if click and btn_confirm.contains(mouse) and rating is not None:
                 submit_t = datetime.datetime.now()
                 rating_outlet.push_sample([
-                    make_message(MSG_RATING, current_rnd, int(rating), fmt_time(submit_t))
+                    make_message(MSG_RATING, current_rnd, fmt_score(rating), fmt_time(submit_t))
                 ])
                 current_rnd += 1
                 reset_rating_ui()
@@ -270,8 +296,10 @@ def main():
             pat_stim_sub.draw()
         elif state == ST_RATING:
             pat_rate_title.draw()
+            pat_rate_hint.draw()
             pat_slider.draw()
             pat_lab_left.draw()
+            pat_lab_mid.draw()
             pat_lab_right.draw()
             pat_value.draw()
             btn_confirm.draw(mouse)

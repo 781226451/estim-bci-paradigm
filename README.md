@@ -5,11 +5,14 @@ doctor-side and patient-side clients. The two clients are designed to run on
 different computers and communicate through Lab Streaming Layer (LSL) via
 `pylsl`.
 
+The current rating scale is visual analog scale-depression, abbreviated as
+VAS-D.
+
 ## Overview
 
-- `doctor.py`: controls stimulation rounds, sends state commands, receives VAS
-  pain ratings, and writes CSV data.
-- `patient.py`: waits for the doctor client, displays stimulation and VAS rating
+- `doctor.py`: controls stimulation rounds, sends state commands, receives VAS-D
+  ratings, and writes CSV data.
+- `patient.py`: waits for the doctor client, displays stimulation and VAS-D rating
   screens, and sends ratings back through LSL.
 - `doctor_config.toml`: runtime settings for the doctor client.
 - `patient_config.toml`: runtime settings for the patient client.
@@ -66,6 +69,7 @@ Important sections:
 - `[screen]`: fullscreen/window-mode settings.
 - `[monitor]`: PsychoPy monitor profile name.
 - `[lsl]`: command and rating stream names plus discovery timing.
+- `[rating]`: rating scale full name, abbreviation, range, and step size.
 - `[font]`: font used by PsychoPy text stimuli.
 
 The two computers run independently, so there is no per-role screen-number
@@ -76,14 +80,15 @@ setting. Each client uses the primary display on its own computer.
 1. Doctor starts a stimulation round.
 2. Patient screen switches to "stimulating".
 3. Doctor ends stimulation.
-4. Patient enters the VAS rating screen.
-5. Patient submits a 0-100 VAS pain rating.
+4. Patient enters the VAS-D rating screen.
+5. Patient submits a configured VAS-D rating. VAS-D means visual analog
+   scale-depression, and the default range is 0-100.
 6. Doctor client records the rating to CSV and advances to the next round.
 
 ## Data Output
 
 The doctor client writes CSV files under `data/`. The output includes subject
-metadata, round number, VAS rating, stimulation timestamps, rating submission
+metadata, round number, VAS-D rating, stimulation timestamps, rating submission
 time, rating receive time, and stimulation duration.
 
 Generated data files are ignored by Git.
