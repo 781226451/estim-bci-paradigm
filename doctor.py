@@ -13,9 +13,10 @@ from pylsl import StreamInfo, StreamInlet, StreamOutlet, resolve_byprop
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _CONFIG_PATH = os.path.join(_BASE_DIR, "doctor_config.toml")
+SCREEN_INDEX = 0
 
 _DEFAULTS = {
-    "screen": {"doctor": 0, "fullscreen": True, "window_size": [1280, 720]},
+    "screen": {"fullscreen": True, "window_size": [1280, 720]},
     "monitor": {"name": "testMonitor"},
     "lsl": {"command_stream": "estim_bci_command",
             "rating_stream": "estim_bci_rating",
@@ -40,7 +41,6 @@ def load_config():
 
 
 CFG = load_config()
-DOCTOR_SCREEN = int(CFG["screen"]["doctor"])
 FULLSCREEN = bool(CFG["screen"]["fullscreen"])
 WIN_SIZE = tuple(CFG["screen"]["window_size"])
 MONITOR_NAME = str(CFG["monitor"]["name"])
@@ -189,7 +189,7 @@ def main():
     rating_inlet = None
     last_resolve_t = -RESOLVE_INTERVAL_S
 
-    win = make_window("医生端", DOCTOR_SCREEN)
+    win = make_window("医生端", SCREEN_INDEX)
     win.mouseVisible = True
     mouse = event.Mouse(win=win)
 
