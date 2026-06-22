@@ -1,0 +1,13 @@
+[project]
+name = "estim-bci-paradigm"
+version = "0.1.0"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "numpy<2.3",
+    "psychopy>=2026.1.3",
+    "pylsl>=1.18.2",
+]
+
+[[tool.uv.index]]
+url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/"
+default = true
