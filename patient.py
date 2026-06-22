@@ -62,7 +62,7 @@ RATING_TICKS = [
     RATING_MIN + (RATING_MAX - RATING_MIN) * step / 5
     for step in range(6)
 ]
-RATING_LABELS = []
+RATING_LABELS = None
 RATING_ANCHORS = ["无抑郁", "中等抑郁", "最严重抑郁"]
 SLIDER_POS = (0, -0.02)
 SLIDER_SIZE = (1.35, 0.07)
@@ -183,6 +183,22 @@ def rating_fraction(rating):
     return max(0, min(1, (float(rating) - RATING_MIN) / (RATING_MAX - RATING_MIN)))
 
 
+def quantize_rating(rating):
+    if rating is None:
+        return None
+    rating = max(RATING_MIN, min(RATING_MAX, float(rating)))
+    if RATING_STEP > 0:
+        rating = round((rating - RATING_MIN) / RATING_STEP) * RATING_STEP + RATING_MIN
+    return max(RATING_MIN, min(RATING_MAX, rating))
+
+
+def slider_live_rating(slider):
+    marker = slider.getMarkerPos()
+    if marker is not None:
+        return quantize_rating(marker)
+    return quantize_rating(slider.getRating())
+
+
 def main():
     rating_outlet = make_outlet(RATING_STREAM, "estim_bci_patient_rating")
     command_inlet = None
@@ -210,11 +226,13 @@ def main():
         labels=RATING_LABELS,
         pos=SLIDER_POS, size=SLIDER_SIZE, granularity=RATING_STEP,
         style="slider",
-        color="white", fillColor="#5a8ec5", borderColor="white",
+        color="white", fillColor="#9fd3ff", borderColor="#d8ecff",
         font=FONT, labelHeight=0.035, flip=False)
+    pat_slider.tickLines.opacities = 0
+    pat_slider.marker.opacity = 0
     pat_slider_fill = visual.Rect(
-        win, width=0, height=0.018, pos=(SLIDER_POS[0] - SLIDER_SIZE[0] / 2,
-                                         SLIDER_POS[1]),
+        win, width=0, height=SLIDER_SIZE[1],
+        pos=(SLIDER_POS[0] - SLIDER_SIZE[0] / 2, SLIDER_POS[1]),
         fillColor="#5a8ec5", lineColor="#5a8ec5")
     pat_lab_left = make_text(win, RATING_ANCHORS[0], pos=(-0.70, -0.17),
                              height=0.045, color="#cccccc")
@@ -282,7 +300,8 @@ def main():
         click = rising_edge(pressed, prev_pressed)
 
         if state == ST_RATING:
-            rating = pat_slider.getRating()
+            pat_slider.getMouseResponses()
+            rating = slider_live_rating(pat_slider)
             if rating is None:
                 pat_value.text = "请拖动滑块进行评分"
                 btn_confirm.base_color = "#555555"
@@ -309,7 +328,8 @@ def main():
         elif state == ST_RATING:
             pat_rate_title.draw()
             pat_rate_hint.draw()
-            fill_fraction = rating_fraction(pat_slider.getRating())
+            rating = slider_live_rating(pat_slider)
+            fill_fraction = rating_fraction(rating)
             pat_slider_fill.width = SLIDER_SIZE[0] * fill_fraction
             pat_slider_fill.pos = (
                 SLIDER_POS[0] - SLIDER_SIZE[0] / 2 + pat_slider_fill.width / 2,
