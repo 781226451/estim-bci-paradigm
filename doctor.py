@@ -12,11 +12,10 @@ from psychopy import core, event, gui, visual
 from pylsl import StreamInfo, StreamInlet, StreamOutlet, resolve_byprop
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-_CONFIG_PATH = os.path.join(_BASE_DIR, "config.toml")
+_CONFIG_PATH = os.path.join(_BASE_DIR, "doctor_config.toml")
 
 _DEFAULTS = {
-    "screen": {"doctor": 0, "patient": 0, "fullscreen": True,
-               "window_size": [1280, 720]},
+    "screen": {"doctor": 0, "fullscreen": True, "window_size": [1280, 720]},
     "monitor": {"name": "testMonitor"},
     "lsl": {"command_stream": "estim_bci_command",
             "rating_stream": "estim_bci_rating",
@@ -36,7 +35,7 @@ def load_config():
     except FileNotFoundError:
         print(f"[配置] 未找到 {_CONFIG_PATH}，使用默认显示设置。")
     except Exception as e:
-        print(f"[配置] 读取 config.toml 出错：{e}，使用默认显示设置。")
+        print(f"[配置] 读取 doctor_config.toml 出错：{e}，使用默认显示设置。")
     return cfg
 
 
