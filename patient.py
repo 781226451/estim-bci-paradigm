@@ -64,6 +64,8 @@ RATING_TICKS = [
 ]
 RATING_LABELS = []
 RATING_ANCHORS = ["无抑郁", "中等抑郁", "最严重抑郁"]
+SLIDER_POS = (0, -0.02)
+SLIDER_SIZE = (1.35, 0.07)
 
 COL_BG = "#1e1e28"
 COL_BTN = "#3a6ea5"
@@ -175,6 +177,12 @@ def fmt_score(score):
     return str(int(score)) if score.is_integer() else f"{score:.1f}"
 
 
+def rating_fraction(rating):
+    if rating is None or RATING_MAX == RATING_MIN:
+        return 0
+    return max(0, min(1, (float(rating) - RATING_MIN) / (RATING_MAX - RATING_MIN)))
+
+
 def main():
     rating_outlet = make_outlet(RATING_STREAM, "estim_bci_patient_rating")
     command_inlet = None
@@ -200,10 +208,14 @@ def main():
     pat_slider = visual.Slider(
         win, ticks=RATING_TICKS,
         labels=RATING_LABELS,
-        pos=(0, -0.02), size=(1.35, 0.07), granularity=RATING_STEP,
+        pos=SLIDER_POS, size=SLIDER_SIZE, granularity=RATING_STEP,
         style="slider",
         color="white", fillColor="#5a8ec5", borderColor="white",
         font=FONT, labelHeight=0.035, flip=False)
+    pat_slider_fill = visual.Rect(
+        win, width=0, height=0.018, pos=(SLIDER_POS[0] - SLIDER_SIZE[0] / 2,
+                                         SLIDER_POS[1]),
+        fillColor="#5a8ec5", lineColor="#5a8ec5")
     pat_lab_left = make_text(win, RATING_ANCHORS[0], pos=(-0.70, -0.17),
                              height=0.045, color="#cccccc")
     pat_lab_mid = make_text(win, RATING_ANCHORS[1], pos=(0, -0.17),
@@ -297,6 +309,13 @@ def main():
         elif state == ST_RATING:
             pat_rate_title.draw()
             pat_rate_hint.draw()
+            fill_fraction = rating_fraction(pat_slider.getRating())
+            pat_slider_fill.width = SLIDER_SIZE[0] * fill_fraction
+            pat_slider_fill.pos = (
+                SLIDER_POS[0] - SLIDER_SIZE[0] / 2 + pat_slider_fill.width / 2,
+                SLIDER_POS[1],
+            )
+            pat_slider_fill.draw()
             pat_slider.draw()
             pat_lab_left.draw()
             pat_lab_mid.draw()
