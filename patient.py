@@ -6,8 +6,10 @@
 import csv
 import datetime
 import os
+import sys
 
 import soundfile
+from loguru import logger as LOGGER
 from psychopy import core, event, gui, visual
 from psychopy.hardware.microphone import MicrophoneDevice
 from psychopy.sound.microphone import Microphone
@@ -42,6 +44,18 @@ SLIDER_SIZE = (1.35, 0.07)
 
 STATE_RATING = "rating"
 STATE_RECORDING = "recording"
+
+
+def setup_logging(session_dir):
+    log_path = os.path.join(session_dir, "patient.log")
+    log_format = "{time:YYYY-MM-DD HH:mm:ss.SSS} [{level}] {message}"
+    LOGGER.remove()
+    LOGGER.add(
+        log_path, level="INFO", format=log_format,
+        encoding="utf-8", enqueue=False,
+    )
+    LOGGER.add(sys.stderr, level="INFO", format=log_format, enqueue=False)
+    return log_path
 
 
 def describe_microphone(device):
@@ -164,10 +178,16 @@ def main():
         core.quit()
 
     session_dir, csv_file, writer = open_session(subject_info)
+    log_path = setup_logging(session_dir)
+    LOGGER.info("会话开始：subject={}, session_dir={}, log={}",
+                subject_info["被试编号"], session_dir, log_path)
+    LOGGER.info("麦克风：{}", describe_microphone(microphone_device))
     mic = make_microphone(microphone_device)
     # 流式写盘需与设备原生参数一致（make_microphone 也据此创建麦克风）。
     sample_rate = int(microphone_device.defaultSampleRate)
     channels = int(microphone_device.inputChannels)
+    LOGGER.info("录音参数：sample_rate={}, channels={}, max_recording_s={}",
+                sample_rate, channels, MAX_RECORDING_S)
 
     win = make_window("患者端", SCREEN_INDEX)
     win.mouseVisible = True
@@ -237,23 +257,24 @@ def main():
         try:
             if mic.isRecording:
                 mic.stop()  # 内部会再 poll 一次，把尾部样本搬入缓冲
-        except Exception:
-            pass
+        except Exception as err:
+            LOGGER.exception("编号 {} 停止录音失败：{}", pending["id"], err)
         try:
             drain_recording()  # 写入尾部样本
         except Exception as err:
-            print(f"[录音] 编号 {pending['id']} 写入音频失败：{err}")
+            LOGGER.exception("编号 {} 写入音频失败：{}", pending["id"], err)
         try:
             pending["wav"].close()
-        except Exception:
-            pass
+        except Exception as err:
+            LOGGER.exception("编号 {} 关闭音频文件失败：{}", pending["id"], err)
 
         if pending["frames"] <= 0:
-            print(f"[录音] 编号 {pending['id']} 未获取到音频")
+            LOGGER.warning("编号 {} 未获取到音频", pending["id"])
             try:
                 os.remove(pending["audio_path"])
-            except OSError:
-                pass
+                LOGGER.info("已删除空音频文件：{}", pending["audio_path"])
+            except OSError as err:
+                LOGGER.exception("删除空音频文件失败：{}", err)
         else:
             # 时长取真实写入帧数/采样率；CSV 写入失败时保持会话存活，不自增
             # count，便于重录该条目（音频已在盘上，重录会覆盖同名文件）。
@@ -267,31 +288,42 @@ def main():
                 ])
                 csv_file.flush()
             except Exception as err:
-                print(f"[保存] 编号 {pending['id']} 写入 CSV 失败：{err}")
+                LOGGER.exception("编号 {} 写入 CSV 失败：{}", pending["id"], err)
             else:
+                LOGGER.info(
+                    "编号 {} 已保存：rating={}, duration={:.2f}s, audio={}",
+                    pending["id"], pending["rating"], duration,
+                    pending["audio_file"],
+                )
                 count += 1
         pending = None
         state = STATE_RATING
 
     def quit_all():
+        LOGGER.info("准备退出程序：state={}, pending={}", state, pending is not None)
         # 录音中途退出时，先落盘当前录音与评分，避免数据丢失。
         if state == STATE_RECORDING and pending is not None:
             try:
                 finalize_recording()
-            except Exception:
-                pass
+            except Exception as err:
+                LOGGER.exception("退出前保存当前录音失败：{}", err)
         try:
             if mic.isRecording:
                 mic.stop()
-        except Exception:
-            pass
+        except Exception as err:
+            LOGGER.exception("停止麦克风失败：{}", err)
         try:
             mic.close()
-        except Exception:
-            pass
+        except Exception as err:
+            LOGGER.exception("关闭麦克风失败：{}", err)
         try:
             csv_file.close()
+            LOGGER.info("CSV 文件已关闭")
+        except Exception as err:
+            LOGGER.exception("关闭 CSV 文件失败：{}", err)
         finally:
+            LOGGER.info("程序退出")
+            LOGGER.remove()
             win.close()
             core.quit()
 
@@ -333,12 +365,15 @@ def main():
                         samplerate=sample_rate, channels=channels),
                     "frames": 0,
                 }
+                LOGGER.info("编号 {} 提交评分：rating={}", item_id, pending["rating"])
                 mic.record()
+                LOGGER.info("编号 {} 开始录音：audio={}", item_id, audio_file)
                 state = STATE_RECORDING
                 reset_rating_ui()
                 rating = None
 
             if click and btn_end.contains(mouse):
+                LOGGER.info("点击结束按钮")
                 running = False
 
             fill_fraction = rating_fraction(rating)
@@ -369,8 +404,13 @@ def main():
 
             # 到达录音上限自动停止并保存；或手动点击“停止并保存”。
             if elapsed >= MAX_RECORDING_S or mic.isRecBufferFull:
+                reason = "录音时长达到上限" if elapsed >= MAX_RECORDING_S else "录音缓冲已满"
+                LOGGER.info("编号 {} 停止录音：{}, elapsed={:.1f}s",
+                            pending["id"], reason, elapsed)
                 finalize_recording()
             elif click and btn_stop_recording.contains(mouse):
+                LOGGER.info("编号 {} 手动停止录音：elapsed={:.1f}s",
+                            pending["id"], elapsed)
                 finalize_recording()
 
             recording_title.draw()

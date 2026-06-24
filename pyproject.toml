@@ -3,6 +3,7 @@ name = "estim-bci-paradigm"
 version = "0.1.0"
 requires-python = ">=3.11,<3.12"
 dependencies = [
+    "loguru>=0.7.0",
     "numpy<2.3",
     "psychopy>=2026.1.3",
 ]
