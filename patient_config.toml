@@ -17,17 +17,6 @@ window_size = [3840, 2160]
 # 默认 testMonitor 是 PsychoPy 自带配置，可避免启动时创建临时 monitor 的 warning。
 name = "testMonitor"
 
-[lsl]
-# 医生端发控制指令的 LSL stream 名称。医生端和患者端必须一致。
-command_stream = "estim_bci_command"
-
-# 患者端回传评分的 LSL stream 名称。医生端和患者端必须一致。
-rating_stream = "estim_bci_rating"
-
-# 查找医生端 LSL stream 的间隔和单次超时；数值越小，界面越不容易被阻塞。
-resolve_interval_s = 1.0
-resolve_timeout_s = 0.05
-
 [rating]
 # 当前评分量表：visual analog scale-depression，简称 VAS-D。
 # VAS-D 默认使用 0-100 分。
@@ -36,6 +25,13 @@ full_name = "visual analog scale-depression"
 min = 0
 max = 100
 step = 1
+
+[audio]
+# 麦克风录音参数。每次评分后会自动开始录音，点击“停止并保存”后写入 WAV 文件。
+# 采样率与声道数自动采用所选麦克风的原生参数（单/多声道均支持），无需在此设置。
+
+# 单次录音缓冲上限，单位：秒。录音时间不要超过该值。
+max_recording_s = 300
 
 [font]
 # 中文字体名称。Windows 11 自带 "Microsoft YaHei"。

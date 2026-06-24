@@ -1,60 +1,33 @@
 # -*- coding: utf-8 -*-
 """
-患者端：接收医生端 LSL 指令，显示刺激状态并回传 VAS-D 评分。
+患者端：录入 VAS-D 评分，随后录制麦克风音频并保存本地数据。
 """
 
+import csv
 import datetime
 import os
-import tomllib
 
-from psychopy import core, event, visual
-from pylsl import StreamInfo, StreamInlet, StreamOutlet, resolve_byprop
+import soundfile
+from psychopy import core, event, gui, visual
+from psychopy.hardware.microphone import MicrophoneDevice
+from psychopy.sound.microphone import Microphone
 
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-_CONFIG_PATH = os.path.join(_BASE_DIR, "patient_config.toml")
-SCREEN_INDEX = 0
+import common
+from common import (
+    COL_BTN, COL_BTN_END, COL_BTN_END_HOVER, COL_BTN_HOVER, SCREEN_INDEX,
+    Button, fmt_score, fmt_time, make_text, make_window, rising_edge,
+)
 
-_DEFAULTS = {
-    "screen": {"fullscreen": True, "window_size": [1280, 720]},
-    "monitor": {"name": "testMonitor"},
-    "lsl": {"command_stream": "estim_bci_command",
-            "rating_stream": "estim_bci_rating",
-            "resolve_interval_s": 1.0,
-            "resolve_timeout_s": 0.05},
-    "rating": {"name": "VAS-D",
-               "full_name": "visual analog scale-depression",
-               "min": 0,
-               "max": 100,
-               "step": 1},
-    "font": {"name": "Microsoft YaHei"},
-}
+CFG = common.init_config(
+    "patient_config.toml",
+    {
+        "rating": {"min": 0, "max": 100, "step": 1},
+        "audio": {"max_recording_s": 300},
+    },
+)
 
-
-def load_config():
-    cfg = {k: dict(v) for k, v in _DEFAULTS.items()}
-    try:
-        with open(_CONFIG_PATH, "rb") as f:
-            user = tomllib.load(f)
-        for section, values in user.items():
-            cfg.setdefault(section, {}).update(values)
-    except FileNotFoundError:
-        print(f"[配置] 未找到 {_CONFIG_PATH}，使用默认显示设置。")
-    except Exception as e:
-        print(f"[配置] 读取 patient_config.toml 出错：{e}，使用默认显示设置。")
-    return cfg
-
-
-CFG = load_config()
-FULLSCREEN = bool(CFG["screen"]["fullscreen"])
-WIN_SIZE = tuple(CFG["screen"]["window_size"])
-MONITOR_NAME = str(CFG["monitor"]["name"])
-COMMAND_STREAM = str(CFG["lsl"]["command_stream"])
-RATING_STREAM = str(CFG["lsl"]["rating_stream"])
-RESOLVE_INTERVAL_S = float(CFG["lsl"]["resolve_interval_s"])
-RESOLVE_TIMEOUT_S = float(CFG["lsl"]["resolve_timeout_s"])
-FONT = str(CFG["font"]["name"])
-RATING_NAME = str(CFG["rating"]["name"])
-RATING_FULL_NAME = str(CFG["rating"]["full_name"])
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+MAX_RECORDING_S = float(CFG["audio"]["max_recording_s"])
 RATING_MIN = float(CFG["rating"]["min"])
 RATING_MAX = float(CFG["rating"]["max"])
 RATING_STEP = float(CFG["rating"]["step"])
@@ -67,114 +40,87 @@ RATING_ANCHORS = ["无抑郁", "中等抑郁", "最严重抑郁"]
 SLIDER_POS = (0, -0.02)
 SLIDER_SIZE = (1.35, 0.07)
 
-COL_BG = "#1e1e28"
-COL_BTN = "#3a6ea5"
-COL_BTN_HOVER = "#5a8ec5"
-COL_TEXT = "white"
-
-ST_IDLE = "idle"
-ST_STIM = "stimulating"
-ST_RATING = "rating"
-
-MSG_START = "START_STIM"
-MSG_END_STIM = "END_STIM"
-MSG_END_EXP = "END_EXPERIMENT"
-MSG_RATING = "RATING"
-MSG_READY = "READY"
+STATE_RATING = "rating"
+STATE_RECORDING = "recording"
 
 
-def fmt_time(t):
-    return t.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+def describe_microphone(device):
+    return (
+        f"{device.deviceIndex}: {device.deviceName} "
+        f"({device.hostAPIName}, {device.inputChannels}通道, "
+        f"{int(device.defaultSampleRate)}Hz)"
+    )
 
 
-def make_message(kind, *fields):
-    return "|".join([kind, *(str(field) for field in fields)])
-
-
-def parse_message(message):
-    parts = str(message).split("|")
-    return parts[0], parts[1:]
-
-
-def get_screen_size(screen_index):
+def detect_microphone():
     try:
-        from pyglet import canvas
-
-        screens = canvas.get_display().get_screens()
-        if 0 <= screen_index < len(screens):
-            return int(screens[screen_index].width), int(screens[screen_index].height)
-    except Exception:
-        pass
-    return WIN_SIZE
-
-
-def make_window(title, screen_index):
-    size = get_screen_size(screen_index) if FULLSCREEN else WIN_SIZE
-    return visual.Window(size=size, screen=screen_index, fullscr=FULLSCREEN,
-                         color=COL_BG, units="height", allowGUI=True,
-                         monitor=MONITOR_NAME, title=title)
-
-
-def make_outlet(name, source_id):
-    info = StreamInfo(name, "Markers", 1, 0, "string", source_id)
-    return StreamOutlet(info)
-
-
-def try_make_inlet(name):
-    streams = resolve_byprop("name", name, minimum=1, timeout=RESOLVE_TIMEOUT_S)
-    if not streams:
+        devices = [
+            device for device in MicrophoneDevice.getDevices()
+            if int(getattr(device, "inputChannels", 0)) > 0
+        ]
+    except Exception as err:
+        dlg = gui.Dlg(title="麦克风检测")
+        dlg.addText(f"麦克风检测失败：{err}")
+        dlg.show()
         return None
-    return StreamInlet(streams[0], max_buflen=360, recover=True)
+
+    if not devices:
+        dlg = gui.Dlg(title="麦克风检测")
+        dlg.addText("未检测到可用麦克风，请连接或启用麦克风后重新运行程序。")
+        dlg.show()
+        return None
+
+    choices = [describe_microphone(device) for device in devices]
+    dlg = gui.Dlg(title="麦克风检测")
+    dlg.addText("检测到以下可用麦克风，请选择本次录音使用的设备。")
+    dlg.addField("麦克风", choices=choices, initial=choices[0])
+    result = dlg.show()
+    if not dlg.OK or result is None:
+        return None
+
+    selected_label = result[0]
+    return devices[choices.index(selected_label)]
 
 
-def pull_messages(inlet):
-    messages = []
-    if inlet is None:
-        return messages
-    while True:
-        sample, timestamp = inlet.pull_sample(timeout=0.0)
-        if sample is None:
-            break
-        messages.append((sample[0], timestamp))
-    return messages
+def ask_subject_info():
+    info = {"被试编号": "S001"}
+    dlg = gui.DlgFromDict(dictionary=info, title="评分录音 - 被试信息",
+                          order=["被试编号"])
+    if not dlg.OK:
+        return None
+    return info
 
 
-class Button:
-    def __init__(self, win, label, pos, size=(0.5, 0.14),
-                 base_color=COL_BTN, hover_color=COL_BTN_HOVER):
-        self.base_color = base_color
-        self.hover_color = hover_color
-        self.rect = visual.Rect(win, width=size[0], height=size[1], pos=pos,
-                                fillColor=base_color, lineColor="white",
-                                lineWidth=2)
-        self.text = visual.TextStim(win, text=label, pos=pos, height=0.05,
-                                    font=FONT, color=COL_TEXT, bold=True)
-
-    def contains(self, mouse):
-        return self.rect.contains(mouse)
-
-    def draw(self, mouse=None):
-        if mouse is not None and self.rect.contains(mouse):
-            self.rect.fillColor = self.hover_color
-        else:
-            self.rect.fillColor = self.base_color
-        self.rect.draw()
-        self.text.draw()
+def open_session(subject_info):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_dir = os.path.join(DATA_DIR, f"{subject_info['被试编号']}_{stamp}")
+    os.makedirs(session_dir, exist_ok=True)
+    csv_path = os.path.join(session_dir, "ratings.csv")
+    csv_file = open(csv_path, "w", newline="", encoding="utf-8-sig")
+    writer = csv.writer(csv_file)
+    writer.writerow([
+        "被试编号", "编号", f"{common.RATING_NAME}评分",
+        "评分提交时间", "录音开始时间", "录音结束时间", "录音时长(s)", "音频文件",
+    ])
+    csv_file.flush()
+    return session_dir, csv_file, writer
 
 
-def make_text(win, text="", pos=(0, 0), height=0.07, color=COL_TEXT, bold=False):
-    return visual.TextStim(win, text=text, pos=pos, height=height, font=FONT,
-                           color=color, bold=bold, wrapWidth=1.6,
-                           alignText="center")
-
-
-def rising_edge(pressed_now, prev_pressed):
-    return pressed_now and not prev_pressed
-
-
-def fmt_score(score):
-    score = float(score)
-    return str(int(score)) if score.is_integer() else f"{score:.1f}"
+def make_microphone(device):
+    # 按设备原生采样率与声道数录制：MicrophoneDevice.open() 内部本就强制使用设备的
+    # inputChannels，请求其它值会被静默覆盖；这里显式对齐，支持单/多声道设备。
+    sample_rate = int(device.defaultSampleRate)
+    channels = int(device.inputChannels)
+    max_samples = max(1, int(sample_rate * MAX_RECORDING_S))
+    return Microphone(
+        device=device.deviceIndex,
+        sampleRateHz=sample_rate,
+        channels=channels,
+        maxRecordingSize=max_samples,
+        policyWhenFull="warn",
+        recordingExt="wav",
+    )
 
 
 def rating_fraction(rating):
@@ -200,150 +146,253 @@ def slider_live_rating(slider):
 
 
 def main():
-    rating_outlet = make_outlet(RATING_STREAM, "estim_bci_patient_rating")
-    command_inlet = None
-    last_resolve_t = -RESOLVE_INTERVAL_S
+    microphone_device = detect_microphone()
+    if microphone_device is None:
+        core.quit()
+
+    subject_info = ask_subject_info()
+    if subject_info is None:
+        core.quit()
+
+    session_dir, csv_file, writer = open_session(subject_info)
+    mic = make_microphone(microphone_device)
+    # 流式写盘需与设备原生参数一致（make_microphone 也据此创建麦克风）。
+    sample_rate = int(microphone_device.defaultSampleRate)
+    channels = int(microphone_device.inputChannels)
 
     win = make_window("患者端", SCREEN_INDEX)
     win.mouseVisible = True
     mouse = event.Mouse(win=win)
 
-    pat_wait = make_text(win, "请稍候，等待医生开始……", pos=(0, 0),
-                         height=0.09, bold=True)
-    pat_connecting = make_text(win, "正在连接医生端……", pos=(0, -0.16),
-                               height=0.045, color="#9fd3ff")
-    pat_stim = make_text(win, "正在刺激", pos=(0, 0.05), height=0.16,
-                         color="#ff8a5a", bold=True)
-    pat_stim_sub = make_text(win, "请保持放松", pos=(0, -0.18),
-                             height=0.06, color="#cccccc")
-    pat_rate_title = make_text(win, f"请进行 {RATING_NAME} 评分",
-                               pos=(0, 0.34), height=0.07, bold=True)
-    pat_rate_hint = make_text(
+    title = make_text(win, "患者端 - 评分录音", pos=(0, 0.40),
+                      height=0.06, bold=True)
+    microphone_text = make_text(win, f"麦克风：{describe_microphone(microphone_device)}",
+                                pos=(0, 0.48), height=0.032, color="#cccccc")
+    count_text = make_text(win, "", pos=(0, 0.30), height=0.045,
+                           color="#cccccc")
+    rate_title = make_text(win, f"请进行 {common.RATING_NAME} 评分",
+                           pos=(0, 0.22), height=0.07, bold=True)
+    rate_hint = make_text(
         win, f"拖动滑块选择 {fmt_score(RATING_MIN)}-{fmt_score(RATING_MAX)} 分",
-                              pos=(0, 0.24), height=0.04, color="#cccccc")
-    pat_slider = visual.Slider(
+        pos=(0, 0.12), height=0.04, color="#cccccc")
+    slider = visual.Slider(
         win, ticks=RATING_TICKS,
         labels=RATING_LABELS,
         pos=SLIDER_POS, size=SLIDER_SIZE, granularity=RATING_STEP,
         style="slider",
         color="white", fillColor="#9fd3ff", borderColor="#d8ecff",
-        font=FONT, labelHeight=0.035, flip=False)
-    pat_slider.tickLines.opacities = 0
-    pat_slider.marker.opacity = 0
-    pat_slider_fill = visual.Rect(
+        font=common.FONT, labelHeight=0.035, flip=False)
+    slider.tickLines.opacities = 0
+    slider.marker.opacity = 0
+    slider_fill = visual.Rect(
         win, width=0, height=SLIDER_SIZE[1],
         pos=(SLIDER_POS[0] - SLIDER_SIZE[0] / 2, SLIDER_POS[1]),
         fillColor="#5a8ec5", lineColor="#5a8ec5")
-    pat_lab_left = make_text(win, RATING_ANCHORS[0], pos=(-0.70, -0.17),
-                             height=0.045, color="#cccccc")
-    pat_lab_mid = make_text(win, RATING_ANCHORS[1], pos=(0, -0.17),
-                            height=0.045, color="#cccccc")
-    pat_lab_right = make_text(win, RATING_ANCHORS[2], pos=(0.70, -0.17),
-                              height=0.045, color="#cccccc")
-    pat_value = make_text(win, "", pos=(0, 0.14), height=0.09,
-                          color="#9fd3ff", bold=True)
-    btn_confirm = Button(win, "确认评分", pos=(0, -0.38), size=(0.5, 0.14))
+    lab_left = make_text(win, RATING_ANCHORS[0], pos=(-0.70, -0.17),
+                         height=0.045, color="#cccccc")
+    lab_mid = make_text(win, RATING_ANCHORS[1], pos=(0, -0.17),
+                        height=0.045, color="#cccccc")
+    lab_right = make_text(win, RATING_ANCHORS[2], pos=(0.70, -0.17),
+                          height=0.045, color="#cccccc")
+    value_text = make_text(win, "", pos=(0, -0.25), height=0.06,
+                           color="#9fd3ff", bold=True)
+    saved_text = make_text(win, "", pos=(0, -0.32), height=0.04,
+                           color="#cccccc")
+    recording_title = make_text(win, "正在录音", pos=(0, 0.10), height=0.12,
+                                color="#ff8a5a", bold=True)
+    recording_info = make_text(win, "", pos=(0, -0.06), height=0.05,
+                               color="#cccccc")
+    hint = make_text(win, "ESC 可退出", pos=(0, -0.49),
+                     height=0.035, color="#888888")
 
-    clock = core.Clock()
-    state = ST_IDLE
-    current_rnd = 1
-    last_ready_t = -RESOLVE_INTERVAL_S
+    btn_confirm = Button(win, "确认评分", pos=(-0.32, -0.41), size=(0.5, 0.12))
+    btn_end = Button(win, "结束", pos=(0.32, -0.41), size=(0.5, 0.12),
+                     base_color=COL_BTN_END, hover_color=COL_BTN_END_HOVER)
+    btn_stop_recording = Button(win, "停止并保存", pos=(0, -0.34), size=(0.55, 0.13))
+
+    state = STATE_RATING
+    count = 1
+    pending = None
     prev_pressed = False
     running = True
 
     def reset_rating_ui():
-        pat_slider.reset()
-        pat_value.text = ""
+        slider.reset()
+        value_text.text = ""
         btn_confirm.base_color = COL_BTN
         btn_confirm.hover_color = COL_BTN_HOVER
 
+    def drain_recording():
+        """把已采集的音频帧写入当前 WAV 句柄并清空内存缓冲（边录边写）。"""
+        frags = mic.recording  # 即 device._recording，poll() 持续往里追加
+        if not frags:
+            return
+        for clip in frags:
+            pending["wav"].write(clip.samples)
+            pending["frames"] += clip.samples.shape[0]
+        frags.clear()  # 就地清空，避免整段录音常驻内存
+
+    def finalize_recording():
+        """停止录音、写完剩余音频并关闭文件，补写 CSV，随后回到评分状态。"""
+        nonlocal count, pending, state
+        record_end = datetime.datetime.now()
+        try:
+            if mic.isRecording:
+                mic.stop()  # 内部会再 poll 一次，把尾部样本搬入缓冲
+        except Exception:
+            pass
+        try:
+            drain_recording()  # 写入尾部样本
+        except Exception as err:
+            print(f"[录音] 编号 {pending['id']} 写入音频失败：{err}")
+        try:
+            pending["wav"].close()
+        except Exception:
+            pass
+
+        if pending["frames"] <= 0:
+            saved_text.text = f"编号 {pending['id']} 未获取到音频"
+            try:
+                os.remove(pending["audio_path"])
+            except OSError:
+                pass
+        else:
+            # 时长取真实写入帧数/采样率；CSV 写入失败时提示并保持会话存活，不自增
+            # count，便于重录该条目（音频已在盘上，重录会覆盖同名文件）。
+            duration = pending["frames"] / float(sample_rate)
+            try:
+                writer.writerow([
+                    subject_info["被试编号"], pending["id"], pending["rating"],
+                    fmt_time(pending["rating_time"]),
+                    fmt_time(pending["record_start"]), fmt_time(record_end),
+                    round(duration, 2), pending["audio_file"],
+                ])
+                csv_file.flush()
+            except Exception as err:
+                print(f"[保存] 编号 {pending['id']} 写入 CSV 失败：{err}")
+                saved_text.text = f"编号 {pending['id']} 保存失败：{err}（请重录该条目）"
+            else:
+                saved_text.text = (
+                    f"已保存编号 {pending['id']}：评分 {pending['rating']}，"
+                    f"音频 {pending['audio_file']}"
+                )
+                count += 1
+        pending = None
+        state = STATE_RATING
+
     def quit_all():
-        win.close()
-        core.quit()
-
-    while command_inlet is None:
-        if event.getKeys(keyList=["escape"]):
-            quit_all()
-
-        now = clock.getTime()
-        if now - last_resolve_t >= RESOLVE_INTERVAL_S:
-            command_inlet = try_make_inlet(COMMAND_STREAM)
-            last_resolve_t = now
-
-        pat_connecting.draw()
-        win.flip()
+        # 录音中途退出时，先落盘当前录音与评分，避免数据丢失。
+        if state == STATE_RECORDING and pending is not None:
+            try:
+                finalize_recording()
+            except Exception:
+                pass
+        try:
+            if mic.isRecording:
+                mic.stop()
+        except Exception:
+            pass
+        try:
+            mic.close()
+        except Exception:
+            pass
+        try:
+            csv_file.close()
+        finally:
+            win.close()
+            core.quit()
 
     while running:
         if event.getKeys(keyList=["escape"]):
             quit_all()
 
-        now = clock.getTime()
-        if state == ST_IDLE and now - last_ready_t >= RESOLVE_INTERVAL_S:
-            rating_outlet.push_sample([
-                make_message(MSG_READY, current_rnd, fmt_time(datetime.datetime.now()))
-            ])
-            last_ready_t = now
-
-        for raw_message, _timestamp in pull_messages(command_inlet):
-            kind, fields = parse_message(raw_message)
-            if kind == MSG_START and fields:
-                current_rnd = int(fields[0])
-                state = ST_STIM
-            elif kind == MSG_END_STIM and fields:
-                current_rnd = int(fields[0])
-                reset_rating_ui()
-                state = ST_RATING
-            elif kind == MSG_END_EXP:
-                running = False
-
         pressed = mouse.getPressed()[0]
         click = rising_edge(pressed, prev_pressed)
 
-        if state == ST_RATING:
-            pat_slider.getMouseResponses()
-            rating = slider_live_rating(pat_slider)
+        if state == STATE_RATING:
+            slider.getMouseResponses()
+            rating = slider_live_rating(slider)
+            count_text.text = f"当前编号：{count:04d}"
+
             if rating is None:
-                pat_value.text = "请拖动滑块进行评分"
+                value_text.text = "请拖动滑块进行评分"
                 btn_confirm.base_color = "#555555"
                 btn_confirm.hover_color = "#555555"
             else:
-                pat_value.text = f"当前评分：{fmt_score(rating)}"
+                value_text.text = f"当前评分：{fmt_score(rating)}"
                 btn_confirm.base_color = COL_BTN
                 btn_confirm.hover_color = COL_BTN_HOVER
 
             if click and btn_confirm.contains(mouse) and rating is not None:
-                submit_t = datetime.datetime.now()
-                rating_outlet.push_sample([
-                    make_message(MSG_RATING, current_rnd, fmt_score(rating), fmt_time(submit_t))
-                ])
-                current_rnd += 1
+                item_id = f"{count:04d}"
+                audio_file = f"{item_id}.wav"
+                audio_path = os.path.join(session_dir, audio_file)
+                now = datetime.datetime.now()
+                pending = {
+                    "id": item_id,
+                    "rating": fmt_score(rating),
+                    "rating_time": now,
+                    "audio_file": audio_file,
+                    "audio_path": audio_path,
+                    "record_start": now,
+                    "wav": soundfile.SoundFile(
+                        audio_path, mode="w",
+                        samplerate=sample_rate, channels=channels),
+                    "frames": 0,
+                }
+                mic.record()
+                state = STATE_RECORDING
                 reset_rating_ui()
-                state = ST_IDLE
+                rating = None
 
-        if state == ST_IDLE:
-            pat_wait.draw()
-        elif state == ST_STIM:
-            pat_stim.draw()
-            pat_stim_sub.draw()
-        elif state == ST_RATING:
-            pat_rate_title.draw()
-            pat_rate_hint.draw()
-            rating = slider_live_rating(pat_slider)
+            if click and btn_end.contains(mouse):
+                running = False
+
             fill_fraction = rating_fraction(rating)
-            pat_slider_fill.width = SLIDER_SIZE[0] * fill_fraction
-            pat_slider_fill.pos = (
-                SLIDER_POS[0] - SLIDER_SIZE[0] / 2 + pat_slider_fill.width / 2,
+            slider_fill.width = SLIDER_SIZE[0] * fill_fraction
+            slider_fill.pos = (
+                SLIDER_POS[0] - SLIDER_SIZE[0] / 2 + slider_fill.width / 2,
                 SLIDER_POS[1],
             )
-            pat_slider_fill.draw()
-            pat_slider.draw()
-            pat_lab_left.draw()
-            pat_lab_mid.draw()
-            pat_lab_right.draw()
-            pat_value.draw()
-            btn_confirm.draw(mouse)
-        win.flip()
 
+            title.draw()
+            microphone_text.draw()
+            count_text.draw()
+            rate_title.draw()
+            rate_hint.draw()
+            slider_fill.draw()
+            slider.draw()
+            lab_left.draw()
+            lab_mid.draw()
+            lab_right.draw()
+            value_text.draw()
+            saved_text.draw()
+            btn_confirm.draw(mouse)
+            btn_end.draw(mouse)
+            hint.draw()
+        elif state == STATE_RECORDING:
+            # 录音期间需持续 poll，将流缓冲样本搬入录音缓冲，否则超过
+            # streamBufferSecs（默认 2s）的音频会被覆盖丢失；随后立即写盘。
+            mic.poll()
+            drain_recording()
+            now = datetime.datetime.now()
+            elapsed = (now - pending["record_start"]).total_seconds()
+            recording_info.text = f"编号 {pending['id']}，已录制 {elapsed:.1f} 秒"
+
+            # 到达录音上限自动停止并保存；或手动点击“停止并保存”。
+            if elapsed >= MAX_RECORDING_S or mic.isRecBufferFull:
+                finalize_recording()
+            elif click and btn_stop_recording.contains(mouse):
+                finalize_recording()
+
+            title.draw()
+            microphone_text.draw()
+            recording_title.draw()
+            recording_info.draw()
+            btn_stop_recording.draw(mouse)
+            hint.draw()
+
+        win.flip()
         prev_pressed = pressed
 
     quit_all()
