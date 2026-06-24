@@ -211,8 +211,6 @@ def main():
                                 color="#ff8a5a", bold=True)
     recording_info = make_text(win, "", pos=(0, -0.06), height=0.05,
                                color="#cccccc")
-    hint = make_text(win, "ESC 可退出", pos=(0, -0.49),
-                     height=0.035, color="#888888")
 
     btn_confirm = Button(win, "确认评分", pos=(-0.32, -0.41), size=(0.5, 0.12))
     btn_end = Button(win, "结束", pos=(0.32, -0.41), size=(0.5, 0.12),
@@ -378,7 +376,6 @@ def main():
             saved_text.draw()
             btn_confirm.draw(mouse)
             btn_end.draw(mouse)
-            hint.draw()
         elif state == STATE_RECORDING:
             # 录音期间需持续 poll，将流缓冲样本搬入录音缓冲，否则超过
             # streamBufferSecs（默认 2s）的音频会被覆盖丢失；随后立即写盘。
@@ -399,7 +396,6 @@ def main():
             recording_title.draw()
             recording_info.draw()
             btn_stop_recording.draw(mouse)
-            hint.draw()
 
         win.flip()
         prev_pressed = pressed
