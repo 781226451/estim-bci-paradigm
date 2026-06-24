@@ -173,17 +173,10 @@ def main():
     win.mouseVisible = True
     mouse = event.Mouse(win=win)
 
-    title = make_text(win, "患者端 - 评分录音", pos=(0, 0.40),
-                      height=0.06, bold=True)
-    microphone_text = make_text(win, f"麦克风：{describe_microphone(microphone_device)}",
-                                pos=(0, 0.48), height=0.032, color="#cccccc")
-    count_text = make_text(win, "", pos=(0, 0.30), height=0.045,
+    count_text = make_text(win, "", pos=(0, 0.32), height=0.045,
                            color="#cccccc")
     rate_title = make_text(win, f"请进行 {common.RATING_NAME} 评分",
                            pos=(0, 0.22), height=0.07, bold=True)
-    rate_hint = make_text(
-        win, f"拖动滑块选择 {fmt_score(RATING_MIN)}-{fmt_score(RATING_MAX)} 分",
-        pos=(0, 0.12), height=0.04, color="#cccccc")
     slider = visual.Slider(
         win, ticks=RATING_TICKS,
         labels=RATING_LABELS,
@@ -203,10 +196,8 @@ def main():
                         height=0.045, color="#cccccc")
     lab_right = make_text(win, RATING_ANCHORS[2], pos=(0.70, -0.17),
                           height=0.045, color="#cccccc")
-    value_text = make_text(win, "", pos=(0, -0.25), height=0.06,
-                           color="#9fd3ff", bold=True)
-    saved_text = make_text(win, "", pos=(0, -0.32), height=0.04,
-                           color="#cccccc")
+    value_text = make_text(win, "请拖动滑块进行评分", pos=(0, -0.27),
+                           height=0.05, color="#9fd3ff", bold=True)
     recording_title = make_text(win, "正在录音", pos=(0, 0.10), height=0.12,
                                 color="#ff8a5a", bold=True)
     recording_info = make_text(win, "", pos=(0, -0.06), height=0.05,
@@ -225,7 +216,7 @@ def main():
 
     def reset_rating_ui():
         slider.reset()
-        value_text.text = ""
+        value_text.text = "请拖动滑块进行评分"
         btn_confirm.base_color = COL_BTN
         btn_confirm.hover_color = COL_BTN_HOVER
 
@@ -258,13 +249,13 @@ def main():
             pass
 
         if pending["frames"] <= 0:
-            saved_text.text = f"编号 {pending['id']} 未获取到音频"
+            print(f"[录音] 编号 {pending['id']} 未获取到音频")
             try:
                 os.remove(pending["audio_path"])
             except OSError:
                 pass
         else:
-            # 时长取真实写入帧数/采样率；CSV 写入失败时提示并保持会话存活，不自增
+            # 时长取真实写入帧数/采样率；CSV 写入失败时保持会话存活，不自增
             # count，便于重录该条目（音频已在盘上，重录会覆盖同名文件）。
             duration = pending["frames"] / float(sample_rate)
             try:
@@ -277,12 +268,7 @@ def main():
                 csv_file.flush()
             except Exception as err:
                 print(f"[保存] 编号 {pending['id']} 写入 CSV 失败：{err}")
-                saved_text.text = f"编号 {pending['id']} 保存失败：{err}（请重录该条目）"
             else:
-                saved_text.text = (
-                    f"已保存编号 {pending['id']}：评分 {pending['rating']}，"
-                    f"音频 {pending['audio_file']}"
-                )
                 count += 1
         pending = None
         state = STATE_RATING
@@ -362,18 +348,14 @@ def main():
                 SLIDER_POS[1],
             )
 
-            title.draw()
-            microphone_text.draw()
             count_text.draw()
             rate_title.draw()
-            rate_hint.draw()
             slider_fill.draw()
             slider.draw()
             lab_left.draw()
             lab_mid.draw()
             lab_right.draw()
             value_text.draw()
-            saved_text.draw()
             btn_confirm.draw(mouse)
             btn_end.draw(mouse)
         elif state == STATE_RECORDING:
@@ -391,8 +373,6 @@ def main():
             elif click and btn_stop_recording.contains(mouse):
                 finalize_recording()
 
-            title.draw()
-            microphone_text.draw()
             recording_title.draw()
             recording_info.draw()
             btn_stop_recording.draw(mouse)
