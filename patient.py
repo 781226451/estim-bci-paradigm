@@ -52,11 +52,20 @@ def describe_microphone(device):
     )
 
 
+def is_real_microphone(device):
+    # WASAPI 回环（Loopback）设备会以「输入设备」身份出现，但录的是系统播放的声音，
+    # 静音时没有数据流，会反复报“gone to sleep”，无法当作麦克风使用，需排除。
+    if int(getattr(device, "inputChannels", 0)) <= 0:
+        return False
+    name = str(getattr(device, "deviceName", "")).lower()
+    return "loopback" not in name
+
+
 def detect_microphone():
     try:
         devices = [
             device for device in MicrophoneDevice.getDevices()
-            if int(getattr(device, "inputChannels", 0)) > 0
+            if is_real_microphone(device)
         ]
     except Exception as err:
         dlg = gui.Dlg(title="麦克风检测")
