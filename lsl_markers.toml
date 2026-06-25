@@ -1,0 +1,26 @@
+# ============================================================
+# LSL marker stream 配置文件
+# 程序开始/结束发送下方 marker 值；点击“确认评分”时发送当前 VAS-D 分值。
+# LSL 数据类型在代码中固定为 8-bit integer；当前 marker/评分均为非负整数。
+# ============================================================
+
+[stream]
+# 是否启用 LSL marker 输出。
+enabled = true
+
+# LSL stream 元信息。接收端可按 name/type/source_id 查找该 stream。
+name = "VASDScoreMarkers"
+type = "Markers"
+source_id = "estim-bci-paradigm-vasd-score"
+
+[markers]
+# 范式程序开始/结束 marker 值。
+paradigm_start = 100
+paradigm_end = 101
+
+[uart]
+# UART 串口参数。请按实际设备修改 port，例如 "COM3"、"COM4"。
+port = "COM3"
+baudrate = 115200
+timeout_s = 1.0
+write_timeout_s = 1.0

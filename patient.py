@@ -13,6 +13,7 @@ from loguru import logger as LOGGER
 from psychopy import core, event, gui, visual
 from psychopy.hardware.microphone import MicrophoneDevice
 from psychopy.sound.microphone import Microphone
+from pylsl import StreamInfo, StreamOutlet, local_clock
 
 import common
 from common import (
@@ -23,8 +24,20 @@ from common import (
 CFG = common.init_config(
     "patient_config.toml",
     {
-        "rating": {"min": 0, "max": 100, "step": 1},
+        "rating": {"min": 0, "max": 10, "step": 1},
         "audio": {"max_recording_s": 300},
+    },
+)
+LSL_CFG = common.load_config(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "lsl_markers.toml"),
+    {
+        "stream": {
+            "enabled": True,
+            "name": "VASDScoreMarkers",
+            "type": "Markers",
+            "source_id": "estim-bci-paradigm-vasd-score",
+        },
+        "markers": {},
     },
 )
 
@@ -44,6 +57,66 @@ SLIDER_SIZE = (1.35, 0.07)
 
 STATE_RATING = "rating"
 STATE_RECORDING = "recording"
+
+
+def lsl_int8_value(value, label):
+    value = int(round(float(value)))
+    if not 0 <= value <= 127:
+        raise ValueError(f"{label}={value} 超出 LSL int8 非负 marker 范围 0-127")
+    return value
+
+
+class LSLMarkerSender:
+    def __init__(self, cfg):
+        self.enabled = bool(cfg["stream"].get("enabled", True))
+        self.markers = dict(cfg.get("markers", {}))
+        self.outlet = None
+        if not self.enabled:
+            LOGGER.info("LSL marker stream 已禁用")
+            return
+
+        info = StreamInfo(
+            str(cfg["stream"]["name"]),
+            str(cfg["stream"]["type"]),
+            1,
+            0,
+            "int8",
+            str(cfg["stream"]["source_id"]),
+        )
+        self.outlet = StreamOutlet(info)
+        LOGGER.info(
+            "LSL marker stream 已创建：name={}, type={}, source_id={}",
+            cfg["stream"]["name"],
+            cfg["stream"]["type"],
+            cfg["stream"]["source_id"],
+        )
+
+    def wait_for_consumer(self, timeout_s=5.0):
+        if self.outlet is None:
+            return False
+        connected = self.outlet.wait_for_consumers(timeout_s)
+        if connected:
+            LOGGER.info("LSL receiver 已连接")
+        else:
+            LOGGER.warning("等待 LSL receiver 超时，仍会继续发送 marker")
+        return connected
+
+    def send_marker(self, marker_name):
+        if self.outlet is None:
+            return
+        if marker_name not in self.markers:
+            LOGGER.warning("LSL marker 未配置：{}", marker_name)
+            return
+        value = lsl_int8_value(self.markers[marker_name], marker_name)
+        self.outlet.push_sample([value], local_clock())
+        LOGGER.info("LSL marker：{}={}", marker_name, value)
+
+    def send_score(self, score):
+        if self.outlet is None:
+            return
+        value = lsl_int8_value(score, "VAS-D score")
+        self.outlet.push_sample([value], local_clock())
+        LOGGER.info("LSL VAS-D score：{}", value)
 
 
 def setup_logging(session_dir):
@@ -181,6 +254,9 @@ def main():
     log_path = setup_logging(session_dir)
     LOGGER.info("会话开始：subject={}, session_dir={}, log={}",
                 subject_info["被试编号"], session_dir, log_path)
+    lsl_sender = LSLMarkerSender(LSL_CFG)
+    lsl_sender.wait_for_consumer()
+    lsl_sender.send_marker("paradigm_start")
     LOGGER.info("麦克风：{}", describe_microphone(microphone_device))
     mic = make_microphone(microphone_device)
     # 流式写盘需与设备原生参数一致（make_microphone 也据此创建麦克风）。
@@ -312,6 +388,7 @@ def main():
                 mic.stop()
         except Exception as err:
             LOGGER.exception("停止麦克风失败：{}", err)
+        lsl_sender.send_marker("paradigm_end")
         try:
             mic.close()
         except Exception as err:
@@ -366,6 +443,7 @@ def main():
                     "frames": 0,
                 }
                 LOGGER.info("编号 {} 提交评分：rating={}", item_id, pending["rating"])
+                lsl_sender.send_score(rating)
                 mic.record()
                 LOGGER.info("编号 {} 开始录音：audio={}", item_id, audio_file)
                 state = STATE_RECORDING
