@@ -18,7 +18,7 @@ from pylsl import StreamInfo, StreamOutlet, local_clock
 import common
 from common import (
     COL_BTN, COL_BTN_END, COL_BTN_END_HOVER, COL_BTN_HOVER, SCREEN_INDEX,
-    Button, fmt_score, fmt_time, make_text, make_window, rising_edge,
+    Button, ClickDispatcher, fmt_score, fmt_time, make_text, make_window,
 )
 
 CFG = common.init_config(
@@ -268,6 +268,7 @@ def main():
     win = make_window("患者端", SCREEN_INDEX)
     win.mouseVisible = True
     mouse = event.Mouse(win=win)
+    dispatcher = ClickDispatcher(win, mouse)
 
     count_text = make_text(win, "", pos=(0, 0.32), height=0.045,
                            color="#cccccc")
@@ -307,7 +308,6 @@ def main():
     state = STATE_RATING
     count = 1
     pending = None
-    prev_pressed = False
     running = True
 
     def reset_rating_ui():
@@ -404,17 +404,66 @@ def main():
             win.close()
             core.quit()
 
+    def on_confirm():
+        """确认评分：提交当前分值、开始录音，进入录音状态。"""
+        nonlocal pending, state
+        if state != STATE_RATING:
+            return
+        rating = slider_live_rating(slider)
+        if rating is None:  # 未评分时按钮置灰，这里再兜底一次。
+            return
+        item_id = f"{count:04d}"
+        audio_file = f"{item_id}.wav"
+        audio_path = os.path.join(session_dir, audio_file)
+        now = datetime.datetime.now()
+        pending = {
+            "id": item_id,
+            "rating": fmt_score(rating),
+            "rating_time": now,
+            "audio_file": audio_file,
+            "audio_path": audio_path,
+            "record_start": now,
+            "wav": soundfile.SoundFile(
+                audio_path, mode="w",
+                samplerate=sample_rate, channels=channels),
+            "frames": 0,
+        }
+        LOGGER.info("编号 {} 提交评分：rating={}", item_id, pending["rating"])
+        lsl_sender.send_score(rating)
+        mic.record()
+        LOGGER.info("编号 {} 开始录音：audio={}", item_id, audio_file)
+        state = STATE_RECORDING
+        reset_rating_ui()
+
+    def on_end():
+        """结束：退出主循环。"""
+        nonlocal running
+        LOGGER.info("点击结束按钮")
+        running = False
+
+    def on_stop():
+        """停止并保存：手动结束当前录音。"""
+        if state != STATE_RECORDING or pending is None:
+            return
+        elapsed = (datetime.datetime.now() - pending["record_start"]).total_seconds()
+        LOGGER.info("编号 {} 手动停止录音：elapsed={:.1f}s", pending["id"], elapsed)
+        finalize_recording()
+
+    btn_confirm.on_click = on_confirm
+    btn_end.on_click = on_end
+    btn_stop_recording.on_click = on_stop
+
     while running:
         if event.getKeys(keyList=["escape"]):
             quit_all()
 
-        pressed = mouse.getPressed()[0]
-        click = rising_edge(pressed, prev_pressed)
-
         if state == STATE_RATING:
             slider.getMouseResponses()
-            rating = slider_live_rating(slider)
             count_text.text = f"当前编号：{count:04d}"
+            # 先派发点击（可能开始录音并重置滑块），再读取分值用于显示，
+            # 这样确认后同一帧填充条即归零，无需手动清空 rating。
+            dispatcher.dispatch(active=[btn_confirm, btn_end])
+            rating = slider_live_rating(slider)
 
             if rating is None:
                 value_text.text = "请拖动滑块进行评分"
@@ -424,35 +473,6 @@ def main():
                 value_text.text = f"当前评分：{fmt_score(rating)}"
                 btn_confirm.base_color = COL_BTN
                 btn_confirm.hover_color = COL_BTN_HOVER
-
-            if click and btn_confirm.contains(mouse) and rating is not None:
-                item_id = f"{count:04d}"
-                audio_file = f"{item_id}.wav"
-                audio_path = os.path.join(session_dir, audio_file)
-                now = datetime.datetime.now()
-                pending = {
-                    "id": item_id,
-                    "rating": fmt_score(rating),
-                    "rating_time": now,
-                    "audio_file": audio_file,
-                    "audio_path": audio_path,
-                    "record_start": now,
-                    "wav": soundfile.SoundFile(
-                        audio_path, mode="w",
-                        samplerate=sample_rate, channels=channels),
-                    "frames": 0,
-                }
-                LOGGER.info("编号 {} 提交评分：rating={}", item_id, pending["rating"])
-                lsl_sender.send_score(rating)
-                mic.record()
-                LOGGER.info("编号 {} 开始录音：audio={}", item_id, audio_file)
-                state = STATE_RECORDING
-                reset_rating_ui()
-                rating = None
-
-            if click and btn_end.contains(mouse):
-                LOGGER.info("点击结束按钮")
-                running = False
 
             fill_fraction = rating_fraction(rating)
             slider_fill.width = SLIDER_SIZE[0] * fill_fraction
@@ -480,23 +500,20 @@ def main():
             elapsed = (now - pending["record_start"]).total_seconds()
             recording_info.text = f"编号 {pending['id']}，已录制 {elapsed:.1f} 秒"
 
-            # 到达录音上限自动停止并保存；或手动点击“停止并保存”。
+            # 到达录音上限自动停止并保存；否则等待手动点击“停止并保存”。
             if elapsed >= MAX_RECORDING_S or mic.isRecBufferFull:
                 reason = "录音时长达到上限" if elapsed >= MAX_RECORDING_S else "录音缓冲已满"
                 LOGGER.info("编号 {} 停止录音：{}, elapsed={:.1f}s",
                             pending["id"], reason, elapsed)
                 finalize_recording()
-            elif click and btn_stop_recording.contains(mouse):
-                LOGGER.info("编号 {} 手动停止录音：elapsed={:.1f}s",
-                            pending["id"], elapsed)
-                finalize_recording()
+            else:
+                dispatcher.dispatch(active=[btn_stop_recording])
 
             recording_title.draw()
             recording_info.draw()
             btn_stop_recording.draw(mouse)
 
         win.flip()
-        prev_pressed = pressed
 
     quit_all()
 

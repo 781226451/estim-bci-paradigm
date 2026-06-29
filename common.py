@@ -74,8 +74,41 @@ def fmt_score(score):
     return str(int(score)) if score.is_integer() else f"{score:.1f}"
 
 
-def rising_edge(pressed_now, prev_pressed):
-    return pressed_now and not prev_pressed
+class ClickDispatcher:
+    """事件级捕获 + 逐帧命中派发，统一鼠标点击与触摸轻点（类 Qt 的 clicked 信号）。
+
+    触摸屏一次轻点的“按下→抬起”常短于一帧，逐帧轮询 mouse.getPressed() 的瞬时
+    状态会错过 0→1 跳变，导致按钮“点不动”。这里用 pyglet 的按下事件回调锁存
+    “发生过按下”，再快的轻点也不丢；命中检测放到下一帧 dispatch() 时用
+    mouse.getPos() 做——它已由 PsychoPy 换算成 height 单位并处理了 DPI/retina
+    缩放，避免在回调里手动换算像素坐标而在缩放屏上点偏。
+
+    回调用 push_handlers 挂到事件栈顶且不返回 EVENT_HANDLED，事件继续下发给
+    PsychoPy 自身的处理器，因此滑块拖动、鼠标位置等原有行为不受影响。
+    """
+
+    def __init__(self, win, mouse):
+        from pyglet.window import mouse as pyglet_mouse
+
+        self._mouse = mouse
+        self._left_mask = pyglet_mouse.LEFT
+        self._pressed = False
+        win.winHandle.push_handlers(on_mouse_press=self._on_press)
+
+    def _on_press(self, x, y, button, modifiers):
+        # 只接受左键/触摸主按钮；长按触发的右键（button=RIGHT）不计。
+        if button & self._left_mask:
+            self._pressed = True
+
+    def dispatch(self, active):
+        """消费一次锁存：若发生过按下，调用首个被命中且可点按钮的 on_click。"""
+        if not self._pressed:
+            return
+        self._pressed = False
+        for button in active:
+            if button.on_click is not None and button.contains(self._mouse):
+                button.on_click()
+                break
 
 
 def get_screen_size(screen_index):
@@ -105,9 +138,10 @@ def make_text(win, text="", pos=(0, 0), height=0.07, color=COL_TEXT, bold=False)
 
 class Button:
     def __init__(self, win, label, pos, size=(0.5, 0.14),
-                 base_color=COL_BTN, hover_color=COL_BTN_HOVER):
+                 base_color=COL_BTN, hover_color=COL_BTN_HOVER, on_click=None):
         self.base_color = base_color
         self.hover_color = hover_color
+        self.on_click = on_click
         self.rect = visual.Rect(win, width=size[0], height=size[1], pos=pos,
                                 fillColor=base_color, lineColor="white",
                                 lineWidth=2)
