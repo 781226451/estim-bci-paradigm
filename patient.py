@@ -123,11 +123,15 @@ def setup_logging(session_dir):
     log_path = os.path.join(session_dir, "patient.log")
     log_format = "{time:YYYY-MM-DD HH:mm:ss.SSS} [{level}] {message}"
     LOGGER.remove()
+    # 关闭 loguru 的 backtrace/diagnose：默认会把每个栈帧的变量值都 dump 出来，
+    # 一个普通异常会刷出几十行，这里只保留简洁的标准栈信息。
     LOGGER.add(
         log_path, level="INFO", format=log_format,
         encoding="utf-8", enqueue=False,
+        backtrace=False, diagnose=False,
     )
-    LOGGER.add(sys.stderr, level="INFO", format=log_format, enqueue=False)
+    LOGGER.add(sys.stderr, level="INFO", format=log_format, enqueue=False,
+               backtrace=False, diagnose=False)
     return log_path
 
 
@@ -319,7 +323,7 @@ def main():
     def drain_recording():
         """把已采集的音频帧写入当前 WAV 句柄并清空内存缓冲（边录边写）。"""
         frags = mic.recording  # 即 device._recording，poll() 持续往里追加
-        if not frags:
+        if not frags or pending["wav"] is None:
             return
         for clip in frags:
             pending["wav"].write(clip.samples)
@@ -340,38 +344,44 @@ def main():
         except Exception as err:
             LOGGER.exception("编号 {} 写入音频失败：{}", pending["id"], err)
         try:
-            pending["wav"].close()
+            if pending["wav"] is not None:
+                pending["wav"].close()
         except Exception as err:
             LOGGER.exception("编号 {} 关闭音频文件失败：{}", pending["id"], err)
 
-        if pending["frames"] <= 0:
-            LOGGER.warning("编号 {} 未获取到音频", pending["id"])
+        # 无论是否成功获取到音频，VAS-D 评分都必须写入 CSV，避免录音异常导致
+        # 评分丢失；无音频时仅清理空文件并把音频相关字段留空/置零。
+        if pending["frames"] > 0:
+            duration = pending["frames"] / float(sample_rate)
+            audio_file = pending["audio_file"]
+        else:
+            LOGGER.warning("编号 {} 未获取到音频，仅记录评分", pending["id"])
+            duration = 0.0
+            audio_file = ""
             try:
                 os.remove(pending["audio_path"])
                 LOGGER.info("已删除空音频文件：{}", pending["audio_path"])
             except OSError as err:
                 LOGGER.exception("删除空音频文件失败：{}", err)
+
+        # CSV 写入失败时保持会话存活、不自增 count，便于重录该条目。
+        try:
+            writer.writerow([
+                subject_info["被试编号"], pending["id"], pending["rating"],
+                fmt_time(pending["rating_time"]),
+                fmt_time(pending["record_start"]), fmt_time(record_end),
+                round(duration, 2), audio_file,
+            ])
+            csv_file.flush()
+        except Exception as err:
+            LOGGER.exception("编号 {} 写入 CSV 失败：{}", pending["id"], err)
         else:
-            # 时长取真实写入帧数/采样率；CSV 写入失败时保持会话存活，不自增
-            # count，便于重录该条目（音频已在盘上，重录会覆盖同名文件）。
-            duration = pending["frames"] / float(sample_rate)
-            try:
-                writer.writerow([
-                    subject_info["被试编号"], pending["id"], pending["rating"],
-                    fmt_time(pending["rating_time"]),
-                    fmt_time(pending["record_start"]), fmt_time(record_end),
-                    round(duration, 2), pending["audio_file"],
-                ])
-                csv_file.flush()
-            except Exception as err:
-                LOGGER.exception("编号 {} 写入 CSV 失败：{}", pending["id"], err)
-            else:
-                LOGGER.info(
-                    "编号 {} 已保存：rating={}, duration={:.2f}s, audio={}",
-                    pending["id"], pending["rating"], duration,
-                    pending["audio_file"],
-                )
-                count += 1
+            LOGGER.info(
+                "编号 {} 已保存：rating={}, duration={:.2f}s, audio={}",
+                pending["id"], pending["rating"], duration,
+                audio_file or "(无)",
+            )
+            count += 1
         pending = None
         state = STATE_RATING
 
@@ -423,14 +433,24 @@ def main():
             "audio_file": audio_file,
             "audio_path": audio_path,
             "record_start": now,
-            "wav": soundfile.SoundFile(
-                audio_path, mode="w",
-                samplerate=sample_rate, channels=channels),
+            "wav": None,
             "frames": 0,
         }
         LOGGER.info("编号 {} 提交评分：rating={}", item_id, pending["rating"])
         lsl_sender.send_score(rating)
-        mic.record()
+        # 打开音频文件并开始录音；任一环节失败都直接收尾，由 finalize_recording
+        # 把评分写入 CSV（无音频时音频字段留空），避免评分随录音异常丢失。
+        try:
+            pending["wav"] = soundfile.SoundFile(
+                audio_path, mode="w",
+                samplerate=sample_rate, channels=channels)
+            mic.record()
+        except Exception as err:
+            # 设备掉线/被占用等是可预期的运行时错误，记一行即可，无需完整栈。
+            LOGGER.error("编号 {} 启动录音失败，仅记录评分：{}", item_id, err)
+            finalize_recording()
+            reset_rating_ui()
+            return
         LOGGER.info("编号 {} 开始录音：audio={}", item_id, audio_file)
         state = STATE_RECORDING
         reset_rating_ui()
@@ -494,20 +514,28 @@ def main():
         elif state == STATE_RECORDING:
             # 录音期间需持续 poll，将流缓冲样本搬入录音缓冲，否则超过
             # streamBufferSecs（默认 2s）的音频会被覆盖丢失；随后立即写盘。
-            mic.poll()
-            drain_recording()
-            now = datetime.datetime.now()
-            elapsed = (now - pending["record_start"]).total_seconds()
-            recording_info.text = f"编号 {pending['id']}，已录制 {elapsed:.1f} 秒"
-
-            # 到达录音上限自动停止并保存；否则等待手动点击“停止并保存”。
-            if elapsed >= MAX_RECORDING_S or mic.isRecBufferFull:
-                reason = "录音时长达到上限" if elapsed >= MAX_RECORDING_S else "录音缓冲已满"
-                LOGGER.info("编号 {} 停止录音：{}, elapsed={:.1f}s",
-                            pending["id"], reason, elapsed)
+            try:
+                mic.poll()
+                drain_recording()
+            except Exception as err:
+                # poll/写盘出错也要立即收尾，保住已采集音频与评分。
+                # 设备休眠/掉线等是可预期错误，记一行即可，无需完整栈。
+                LOGGER.error("编号 {} 录音过程中出错，提前结束并保存：{}",
+                             pending["id"], err)
                 finalize_recording()
             else:
-                dispatcher.dispatch(active=[btn_stop_recording])
+                now = datetime.datetime.now()
+                elapsed = (now - pending["record_start"]).total_seconds()
+                recording_info.text = f"编号 {pending['id']}，已录制 {elapsed:.1f} 秒"
+
+                # 到达录音上限自动停止并保存；否则等待手动点击“停止并保存”。
+                if elapsed >= MAX_RECORDING_S or mic.isRecBufferFull:
+                    reason = "录音时长达到上限" if elapsed >= MAX_RECORDING_S else "录音缓冲已满"
+                    LOGGER.info("编号 {} 停止录音：{}, elapsed={:.1f}s",
+                                pending["id"], reason, elapsed)
+                    finalize_recording()
+                else:
+                    dispatcher.dispatch(active=[btn_stop_recording])
 
             recording_title.draw()
             recording_info.draw()
